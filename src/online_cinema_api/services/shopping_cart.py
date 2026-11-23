@@ -1,0 +1,247 @@
+from datetime import date
+
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from online_cinema_api.core.exceptions import (
+    MovieExistInCart,
+    MovieExistInOrderError,
+    MovieNotFoundError,
+    MovieNotInCartError,
+    UserNotFoundError,
+)
+from online_cinema_api.db.models import (
+    Cart,
+    CartItem,
+    Order,
+    OrderItem,
+    OrderStatusEnum,
+)
+from online_cinema_api.db.models.accounts import UserModel, UserProfileModel
+from online_cinema_api.db.models.movies import Movie
+from online_cinema_api.schemas.shopping_cart import (
+    CartItemAdd,
+    CartMovieResponse,
+    MoviePurchasedResponse,
+)
+
+
+async def add_movie_to_cart(
+    data: CartItemAdd, db: AsyncSession, current_user: UserModel
+):
+    movie = await db.scalar(select(Movie).where(Movie.id == data.movie_id))
+    if movie is None:
+        raise MovieNotFoundError
+
+    is_movie_already_in_order = await db.scalar(
+        select(OrderItem.id)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(
+            Order.user_id == current_user.id,
+            Order.status == OrderStatusEnum.PAID,
+            OrderItem.movie_id == data.movie_id,
+        )
+        .limit(1)
+    )
+    if is_movie_already_in_order:
+        raise MovieExistInOrderError
+
+    is_movie_in_cart = await db.scalar(
+        select(CartItem.id)
+        .join(Cart, CartItem.cart_id == Cart.id)
+        .where(Cart.user_id == current_user.id, CartItem.movie_id == data.movie_id)
+        .limit(1)
+    )
+    if is_movie_in_cart:
+        raise MovieExistInCart
+
+    cart_user = await db.scalar(select(Cart).where(Cart.user_id == current_user.id))
+    if cart_user is None:
+        cart_user = Cart(user_id=current_user.id)
+        db.add(cart_user)
+        await db.flush()
+
+    item = CartItem(cart_id=cart_user.id, movie_id=data.movie_id)
+    db.add(item)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise MovieExistInCart
+
+    await db.refresh(item)
+    return item
+
+
+async def delete_movie_from_cart_by_user_id(
+    db: AsyncSession, data_user: UserModel, movie_id: int
+):
+    movie_for_delete = await db.scalar(
+        select(CartItem)
+        .join(Cart, CartItem.cart_id == Cart.id)
+        .where(Cart.user_id == data_user.id, CartItem.movie_id == movie_id)
+    )
+
+    if movie_for_delete is None:
+        raise MovieNotInCartError
+
+    await db.delete(movie_for_delete)
+    await db.commit()
+
+
+async def get_movie_from_cart(db: AsyncSession, user_id: int):
+    result = (
+        await db.scalars(
+            select(CartItem)
+            .join(Cart, CartItem.cart_id == Cart.id)
+            .where(Cart.user_id == user_id)
+            .options(selectinload(CartItem.movie).selectinload(Movie.genres))
+            .order_by(CartItem.added_at)
+        )
+    ).all()
+
+    movies = []
+    total_price = 0
+    for item in result:
+        movie = item.movie
+        movies.append(
+            CartMovieResponse(
+                id=movie.id,
+                name=movie.name,
+                price=movie.price,
+                year=movie.year,
+                genres=[i.name for i in movie.genres],
+                added_at=item.added_at,
+            )
+        )
+        total_price += movie.price
+
+    return {"items": movies, "total_price": total_price}
+
+
+async def delete_all_movie_from_cart(db: AsyncSession, current_user: UserModel):
+    query = (
+        select(CartItem.id)
+        .join(Cart, CartItem.cart_id == Cart.id)
+        .where(Cart.user_id == current_user.id)
+    )
+    delete_query = delete(CartItem).where(CartItem.id.in_(query))
+    await db.execute(delete_query)
+    await db.commit()
+
+
+async def see_cart_user_for_admin(db: AsyncSession, user_id: int):
+    if await db.get(UserModel, user_id) is None:
+        raise UserNotFoundError
+    return await get_movie_from_cart(db, user_id)
+
+
+async def is_movie_in_any_cart(db: AsyncSession, movie_id: int):
+    is_movie_in_cart = await db.scalar(
+        select(CartItem.id).where(CartItem.movie_id == movie_id).limit(1)
+    )
+    return bool(is_movie_in_cart)
+
+
+async def remove_purchased_movies(db: AsyncSession, user_id: int):
+    cart = (
+        select(OrderItem.movie_id)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(Order.status == OrderStatusEnum.PAID, Order.user_id == user_id)
+    )
+
+    cartilage = (
+        await db.scalars(
+            select(CartItem)
+            .join(Cart, CartItem.cart_id == Cart.id)
+            .where(Cart.user_id == user_id, CartItem.movie_id.in_(cart))
+            .options(selectinload(CartItem.movie))
+        )
+    ).all()
+
+    name_of_deleted_movie = [i.movie.name for i in cartilage]
+
+    for obj in cartilage:
+        await db.delete(obj)
+    await db.commit()
+
+    return name_of_deleted_movie
+
+
+async def remove_unavailable_movies(db: AsyncSession, user_id: int):
+    min_age_certification = {
+        "G": 0,
+        "PG": 0,
+        "PG-13": 13,
+        "R": 17,
+        "NC-17": 18,
+    }
+
+    born = await db.scalar(
+        select(UserProfileModel.date_of_birth).where(
+            UserProfileModel.user_id == user_id
+        )
+    )
+    if born is None:
+        return []
+
+    cart_item_for_user = (
+        await db.scalars(
+            select(CartItem)
+            .join(Cart, CartItem.cart_id == Cart.id)
+            .where(Cart.user_id == user_id)
+            .options(selectinload(CartItem.movie).selectinload(Movie.certification))
+        )
+    ).all()
+
+    name_cart_item_for_delete = []
+
+    today = date.today()
+
+    age_user = (
+        today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+    )
+
+    for item in cart_item_for_user:
+        if min_age_certification.get(item.movie.certification.name, 0) > age_user:
+            name_cart_item_for_delete.append(item.movie.name)
+            await db.delete(item)
+    await db.commit()
+
+    return name_cart_item_for_delete
+
+
+async def get_purchased_movies(db: AsyncSession, user_id: int, limit: int, skip: int):
+    query = (
+        select(OrderItem.movie_id)
+        .join(Order, OrderItem.order_id == Order.id)
+        .where(Order.user_id == user_id, Order.status == OrderStatusEnum.PAID)
+    )
+
+    purchased_movies = (
+        await db.scalars(
+            select(Movie)
+            .where(Movie.id.in_(query))
+            .limit(limit)
+            .offset(skip)
+            .order_by(Movie.id)
+            .options(selectinload(Movie.genres))
+        )
+    ).all()
+
+    result = []
+
+    for movies in purchased_movies:
+        result.append(
+            MoviePurchasedResponse(
+                id=movies.id,
+                name=movies.name,
+                price=movies.price,
+                year=movies.year,
+                genres=[movie.name for movie in movies.genres],
+            )
+        )
+
+    return result

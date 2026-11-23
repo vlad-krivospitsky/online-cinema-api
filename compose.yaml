@@ -1,0 +1,185 @@
+services:
+  db:
+    image: postgres:18.6-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-online_cinema}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - cinema_network
+
+  seed:
+    build:
+      context: .
+    restart: "no"
+    command:
+      [
+        "python",
+        "-m",
+        "online_cinema_api.db.seed",
+      ]
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-online_cinema}"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - cinema_network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - cinema_network
+
+  minio:
+    image: pgsty/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - cinema_network
+
+  migrate:
+    build:
+      context: .
+    restart: "no"
+    command:
+      [
+        "uv",
+        "run",
+        "alembic",
+        "upgrade",
+        "head",
+      ]
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-online_cinema}"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - cinema_network
+
+  web:
+    build:
+      context: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-online_cinema}"
+      REDIS_URL: "redis://redis:6379/0"
+      MINIO_ENDPOINT: "http://minio:9000"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - cinema_network
+
+  celery-worker:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    command:
+      [
+        "python",
+        "-m",
+        "celery",
+        "-A",
+        "online_cinema_api.celery_app:celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--concurrency=1",
+      ]
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-online_cinema}"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - cinema_network
+
+  celery-beat:
+    build:
+      context: .
+    restart: unless-stopped
+    init: true
+    command:
+      [
+        "python",
+        "-m",
+        "celery",
+        "-A",
+        "online_cinema_api.celery_app:celery_app",
+        "beat",
+        "--loglevel=INFO",
+        "--schedule=/home/appuser/celerybeat-schedule",
+      ]
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@db:5432/${POSTGRES_DB:-online_cinema}"
+      REDIS_URL: "redis://redis:6379/0"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - cinema_network
+
+networks:
+  cinema_network:
+    name: cinema_network
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

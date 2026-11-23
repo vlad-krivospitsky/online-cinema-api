@@ -1,0 +1,148 @@
+class AppError(Exception):
+    status_code: int = 500
+    detail: str = "Internal server error"
+
+    def __init__(self, detail: str | None = None) -> None:
+        if detail is not None:
+            self.detail = detail
+        super().__init__(self.detail)
+
+
+class MovieNotFoundError(AppError):
+    status_code = 404
+    detail = "Movie not found"
+
+
+class MovieExistInOrderError(AppError):
+    status_code = 409
+    detail = "You cant buy movie again"
+
+
+class MovieExistInCart(AppError):
+    status_code = 409
+    detail = "Movie already in cart"
+
+
+class MovieNotInCartError(AppError):
+    status_code = 404
+    detail = "Movie not found in cart"
+
+
+class UserAlreadyExistsError(AppError):
+    status_code = 409
+    detail = "A user with this email already exists."
+
+
+class UserGroupNotFoundError(AppError):
+    status_code = 500
+    detail = "Default user group not found."
+
+
+class InvalidActivationTokenError(AppError):
+    status_code = 400
+    detail = "Invalid or expired activation token."
+
+
+class AccountAlreadyActiveError(AppError):
+    status_code = 400
+    detail = "User account is already active."
+
+
+class InvalidCredentialsError(AppError):
+    status_code = 401
+    detail = "Invalid email or password."
+
+
+class AccountNotActivatedError(AppError):
+    status_code = 403
+    detail = "User account is not activated."
+
+
+class RefreshTokenNotFoundError(AppError):
+    status_code = 401
+    detail = "Refresh token not found."
+
+
+class UserNotFoundError(AppError):
+    status_code = 404
+    detail = "User not found."
+
+
+class GetPurchasedMoviesError(AppError):
+    status_code = 404
+    detail = "Smt error with get purchased movies."
+
+
+class RemovePurchasedMoviesError(AppError):
+    status_code = 404
+    detail = "Smt error with remove purchased movies."
+
+
+class MovieNotInAnyCartError(AppError):
+    status_code = 404
+    detail = "Smt error with movie not in any cart."
+
+
+class MovieInAnyCartError(AppError):
+    status_code = 404
+    detail = "Smt error with movie in any cart."
+
+
+class RemoveUnavailableMovies(AppError):
+    status_code = 404
+    detail = "Smt error with get purchased movies."
+
+
+class OrderNotFoundError(AppError):
+    status_code = 404
+    detail = "Order not found."
+
+
+class EmptyOrderError(AppError):
+    status_code = 400
+    detail = "There are no movies available to order."
+
+
+class PendingOrderExistsError(AppError):
+    status_code = 409
+    detail = "A pending order with the same movies already exists."
+
+
+class OrderCancellationError(AppError):
+    status_code = 409
+    detail = "The order cannot be canceled."
+
+
+class PermissionForReadUserCartError(AppError):
+    status_code = 403
+    detail = "Not enough permissions"
+
+
+class MovieInUserCartsError(AppError):
+    status_code = 409
+    detail = "This movie in cart users"
+
+
+class OrderNotPendingError(AppError):
+    status_code = 409
+    detail = "Only a pending order can be paid or recalculated."
+
+
+class InvalidPaymentAmountError(AppError):
+    status_code = 400
+    detail = "Invalid order amount."
+
+
+class PaymentProviderError(AppError):
+    status_code = 400
+    detail = "Payment failed. Try a different payment method or try again later."
+
+
+class PaymentNotFoundError(AppError):
+    status_code = 404
+    detail = "Payment not found."
+
+
+class PaymentNotRefundableError(AppError):
+    status_code = 409
+    detail = "Only a successful payment can be refunded."
